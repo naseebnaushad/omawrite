@@ -8,7 +8,28 @@ A dead-simple Markdown writing app built with Qt Quick and C++ that automaticall
 
 ## Install
 
+### Linux (Omarchy)
+
 Install via the Omarchy Package Repository via the `omawrite` package. It's installed by default in new installations of Omarchy (from Quattro forward).
+
+### macOS (Apple Silicon)
+
+Install Qt 6 via Homebrew, then build:
+
+```sh
+brew install qt
+./bin/build
+open build/Omawrite.app
+```
+
+`bin/build` produces a native arm64 `Omawrite.app` bundle in `build/`. There is no
+package/installer step yet — copy the bundle to `/Applications` if you want it
+available outside the build directory.
+
+On macOS, dark/light mode follows the system appearance directly (there is no
+desktop portal or Omarchy theme to read from), and the app renders at its
+designed text size since macOS has no system-wide text-scaling knob equivalent
+to GNOME's.
 
 ## Shortcuts
 
@@ -33,8 +54,9 @@ Omawrite at the size it is designed around; larger and smaller sizes scale from 
 
 ## Requirements
 
-- Qt 6: `qt6-base`, `qt6-declarative`, `qt6-quickcontrols2`
-- `xdg-desktop-portal` and a portal backend
+- Linux: Qt 6 (`qt6-base`, `qt6-declarative`, `qt6-quickcontrols2`), `xdg-desktop-portal`
+  and a portal backend
+- macOS: Qt 6 via Homebrew (`brew install qt`), Xcode command line tools
 
 The iA Writer Mono font is bundled under the SIL Open Font License 1.1; see
 `fonts/OFL.txt`. The font is copyright Information Architects Inc. and based on
