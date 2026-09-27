@@ -22,9 +22,19 @@ brew install qt
 open build/Omawrite.app
 ```
 
-`bin/build` produces a native arm64 `Omawrite.app` bundle in `build/`. There is no
-package/installer step yet — copy the bundle to `/Applications` if you want it
-available outside the build directory.
+`bin/build` produces a native arm64 `Omawrite.app` bundle in `build/`. Copy it to
+`/Applications` if you want it available outside the build directory.
+
+To build a self-contained, distributable disk image (bundles the Qt frameworks
+so it runs without Homebrew installed):
+
+```sh
+./bin/dmg
+```
+
+This produces `build/Omawrite.dmg`. The app inside it is ad-hoc signed, not
+notarized, so first launches on another Mac need a right-click → Open (or
+`xattr -d com.apple.quarantine` on the copied `.app`) to get past Gatekeeper.
 
 On macOS, dark/light mode follows the system appearance directly (there is no
 desktop portal or Omarchy theme to read from), and the app renders at its

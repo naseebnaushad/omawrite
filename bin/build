@@ -21,4 +21,8 @@ cd "$BUILD_DIR"
 "$QMAKE" "$ROOT/omawrite.pro"
 make -j"$JOBS"
 
-echo "Built $BUILD_DIR/omawrite"
+if [ -d "$BUILD_DIR/Omawrite.app" ]; then
+  echo "Built $BUILD_DIR/Omawrite.app"
+else
+  echo "Built $BUILD_DIR/omawrite"
+fi
