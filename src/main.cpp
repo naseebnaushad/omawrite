@@ -108,7 +108,7 @@ int main(int argc, char *argv[]) {
 
     const QStringList args = app.arguments();
     if (args.size() > 1)
-        backend.open(QUrl::fromLocalFile(args.at(1)));
+        backend.open(0, QUrl::fromLocalFile(args.at(1)));
 
     // Drain any FileOpen events (e.g. Finder double-click) that arrived
     // before the window and Backend existed, then keep handling later ones
@@ -116,10 +116,10 @@ int main(int argc, char *argv[]) {
     // switches to) a tab, so there's no need to gate this on whether the
     // current document has unsaved changes.
     for (const QUrl &url : app.takePendingOpenFiles())
-        backend.open(url);
+        backend.open(0, url);
 
     QObject::connect(&app, &OmawriteApplication::fileOpenRequested, &backend,
-                     &Backend::open);
+                     [&backend](const QUrl &url) { backend.open(0, url); });
 
     return app.exec();
 }
