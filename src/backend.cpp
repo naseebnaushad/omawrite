@@ -16,6 +16,7 @@
 #include <QRegularExpression>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLockFile>
@@ -30,6 +31,7 @@
 #include <QWindow>
 
 #include <algorithm>
+#include <utility>
 
 #include "markdownhighlighter.h"
 
@@ -191,7 +193,13 @@ void Backend::attachDocument(QObject *textDocument) {
             });
 
     applyDocumentTypography();
+
+    if (m_tabs.isEmpty()) {
+        m_tabs.append(TabData{});
+        m_activeTab = 0;
+    }
     restoreRecovery();
+    emit tabsChanged();
 }
 
 void Backend::openDialog() {
@@ -204,6 +212,16 @@ void Backend::open(const QUrl &url) {
         return;
     }
 
+    // Already open in another tab: just switch to it instead of opening a
+    // second copy.
+    for (int i = 0; i < m_tabs.size(); ++i) {
+        const QUrl tabUrl = (i == m_activeTab) ? m_fileUrl : m_tabs.at(i).fileUrl;
+        if (tabUrl == url) {
+            switchTab(i);
+            return;
+        }
+    }
+
     const QString targetName = QFileInfo(url.toLocalFile()).fileName();
     QFile file(url.toLocalFile());
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -212,14 +230,29 @@ void Backend::open(const QUrl &url) {
     }
 
     const QByteArray contents = file.readAll();
+
+    // Reuse a single still-blank, never-touched tab (the common case: launch
+    // the app, then immediately open a file) instead of leaving it behind as
+    // a stray empty tab.
+    const bool reuseActiveTab = m_tabs.size() == 1 && !m_modified
+        && !m_fileUrl.isValid() && currentDocumentText().isEmpty();
+
+    if (!reuseActiveTab) {
+        syncActiveTabState();
+        m_tabs.append(TabData{});
+        m_activeTab = m_tabs.size() - 1;
+    }
+
     loadDocumentText(QString::fromUtf8(contents));
-    clearRecovery();
     m_lastKnownFileContents = contents;
     m_hasKnownFileContents = true;
-    setFileUrl(url);
+    m_fileUrl = url;
+    emit fileUrlChanged();
     watchCurrentFile();
     setModified(false);
     setStatus(QStringLiteral("Opened %1").arg(fileName()));
+    clearRecovery();
+    emit tabsChanged();
 }
 
 void Backend::save() {
@@ -303,6 +336,128 @@ void Backend::newWindow() {
                                                  QStringList());
     if (!started)
         setStatus(QStringLiteral("Could not open a new window."));
+}
+
+void Backend::newTab() {
+    syncActiveTabState();
+    m_tabs.append(TabData{});
+    m_activeTab = -1;
+    activateTab(m_tabs.size() - 1);
+    emit tabsChanged();
+}
+
+void Backend::switchTab(int index) {
+    if (index < 0 || index >= m_tabs.size() || index == m_activeTab)
+        return;
+
+    syncActiveTabState();
+    activateTab(index);
+    emit tabsChanged();
+}
+
+void Backend::closeTab(int index) {
+    if (index < 0 || index >= m_tabs.size())
+        return;
+
+    if (index == m_activeTab)
+        syncActiveTabState();
+
+    if (m_tabs.at(index).modified) {
+        emit tabCloseNeedsConfirmation(index);
+        return;
+    }
+
+    removeTab(index);
+}
+
+void Backend::forceCloseTab(int index) {
+    if (index < 0 || index >= m_tabs.size())
+        return;
+    removeTab(index);
+}
+
+bool Backend::anyModified() const {
+    for (int i = 0; i < m_tabs.size(); ++i) {
+        if (i == m_activeTab ? m_modified : m_tabs.at(i).modified)
+            return true;
+    }
+    return false;
+}
+
+QString Backend::tabFileName(int index) const {
+    if (index < 0 || index >= m_tabs.size())
+        return QStringLiteral("Untitled.md");
+
+    const QUrl &url = m_tabs.at(index).fileUrl;
+    if (!url.isValid() || url.isEmpty())
+        return QStringLiteral("Untitled.md");
+    const QString name = QFileInfo(url.toLocalFile()).fileName();
+    return name.isEmpty() ? QStringLiteral("Untitled.md") : name;
+}
+
+QVariantList Backend::tabsInfo() const {
+    QVariantList list;
+    for (int i = 0; i < m_tabs.size(); ++i) {
+        const bool active = (i == m_activeTab);
+        list.append(QVariantMap{
+            {QStringLiteral("fileName"), active ? fileName() : tabFileName(i)},
+            {QStringLiteral("modified"), active ? m_modified : m_tabs.at(i).modified},
+        });
+    }
+    return list;
+}
+
+void Backend::syncActiveTabState() {
+    if (m_activeTab < 0 || m_activeTab >= m_tabs.size())
+        return;
+
+    TabData &tab = m_tabs[m_activeTab];
+    tab.fileUrl = m_fileUrl;
+    tab.text = currentDocumentText();
+    tab.modified = m_modified;
+    tab.lastKnownFileContents = m_lastKnownFileContents;
+    tab.hasKnownFileContents = m_hasKnownFileContents;
+}
+
+void Backend::activateTab(int index) {
+    if (index < 0 || index >= m_tabs.size())
+        return;
+
+    const TabData &tab = m_tabs.at(index);
+    m_activeTab = index;
+
+    if (m_fileUrl != tab.fileUrl) {
+        m_fileUrl = tab.fileUrl;
+        emit fileUrlChanged();
+    }
+    loadDocumentText(tab.text);
+    m_lastKnownFileContents = tab.lastKnownFileContents;
+    m_hasKnownFileContents = tab.hasKnownFileContents;
+    watchCurrentFile();
+    setModified(tab.modified);
+    setStatus(QString());
+}
+
+void Backend::removeTab(int index) {
+    if (index < 0 || index >= m_tabs.size())
+        return;
+
+    m_tabs.remove(index);
+
+    if (m_tabs.isEmpty()) {
+        m_tabs.append(TabData{});
+        m_activeTab = -1;
+        activateTab(0);
+    } else if (index == m_activeTab) {
+        const int newIndex = qMin(index, m_tabs.size() - 1);
+        m_activeTab = -1;
+        activateTab(newIndex);
+    } else if (index < m_activeTab) {
+        --m_activeTab;
+    }
+
+    writeRecovery();
+    emit tabsChanged();
 }
 
 QString Backend::clipboardUrl() const {
@@ -522,17 +677,30 @@ QString Backend::recoveryPath() const {
 }
 
 void Backend::writeRecovery() {
-    if (!m_modified)
-        return;
+    syncActiveTabState();
+
     const QString path = recoveryPath();
     if (path.isEmpty())
         return;
+
+    QJsonArray tabsArray;
+    for (const TabData &tab : std::as_const(m_tabs)) {
+        if (!tab.modified)
+            continue;
+        tabsArray.append(QJsonObject{{QStringLiteral("fileUrl"), tab.fileUrl.toString()},
+                                     {QStringLiteral("text"), tab.text}});
+    }
+
+    if (tabsArray.isEmpty()) {
+        QFile::remove(path);
+        return;
+    }
+
     QDir().mkpath(QFileInfo(path).absolutePath());
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly))
         return;
-    const QJsonObject recovery{{QStringLiteral("fileUrl"), m_fileUrl.toString()},
-                               {QStringLiteral("text"), currentDocumentText()}};
+    const QJsonObject recovery{{QStringLiteral("tabs"), tabsArray}};
     file.write(QJsonDocument(recovery).toJson(QJsonDocument::Compact));
     file.commit();
 }
@@ -542,27 +710,46 @@ void Backend::restoreRecovery() {
     if (!file.open(QIODevice::ReadOnly))
         return;
     const QJsonDocument json = QJsonDocument::fromJson(file.readAll());
-    if (!json.isObject() || !json.object().contains(QStringLiteral("text")))
+    if (!json.isObject())
         return;
-    const QJsonObject recovery = json.object();
-    loadDocumentText(recovery.value(QStringLiteral("text")).toString());
-    const QUrl recoveredUrl(recovery.value(QStringLiteral("fileUrl")).toString());
-    QFile diskFile(recoveredUrl.toLocalFile());
-    if (recoveredUrl.isLocalFile() && diskFile.open(QIODevice::ReadOnly)) {
-        m_lastKnownFileContents = diskFile.readAll();
-        m_hasKnownFileContents = true;
-    } else {
-        m_lastKnownFileContents.clear();
-        m_hasKnownFileContents = false;
+
+    QJsonArray tabsArray = json.object().value(QStringLiteral("tabs")).toArray();
+    if (tabsArray.isEmpty()) {
+        // Older, single-document recovery file from before tabs existed.
+        if (!json.object().contains(QStringLiteral("text")))
+            return;
+        tabsArray.append(json.object());
     }
-    setFileUrl(recoveredUrl);
-    setModified(true);
+
+    QVector<TabData> recovered;
+    for (const QJsonValue &value : std::as_const(tabsArray)) {
+        const QJsonObject obj = value.toObject();
+        TabData tab;
+        tab.fileUrl = QUrl(obj.value(QStringLiteral("fileUrl")).toString());
+        tab.text = obj.value(QStringLiteral("text")).toString();
+        tab.modified = true;
+        QFile diskFile(tab.fileUrl.toLocalFile());
+        if (tab.fileUrl.isLocalFile() && diskFile.open(QIODevice::ReadOnly)) {
+            tab.lastKnownFileContents = diskFile.readAll();
+            tab.hasKnownFileContents = true;
+        }
+        recovered.append(tab);
+    }
+
+    if (recovered.isEmpty())
+        return;
+
+    m_tabs = recovered;
+    m_activeTab = -1;
+    activateTab(0);
     setStatus(QStringLiteral("Recovered unsaved changes"));
 }
 
 void Backend::clearRecovery() {
     m_recoveryTimer.stop();
-    QFile::remove(recoveryPath());
+    // Rewrite (rather than unconditionally delete) the aggregate recovery
+    // file, since other tabs may still have unsaved changes worth keeping.
+    writeRecovery();
 }
 
 void Backend::watchCurrentFile() {

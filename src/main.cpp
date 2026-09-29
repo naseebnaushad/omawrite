@@ -1,20 +1,55 @@
 #include <QFont>
 #include <QFontDatabase>
 #include <QApplication>
+#include <QFileOpenEvent>
 #include <QIcon>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQmlError>
 #include <QQuickStyle>
 #include <QUrl>
+#include <QVector>
 #include <QWindow>
 #include <QFile>
+#include <utility>
 
 #include "backend.h"
 #include "systemtheme.h"
 
+// macOS delivers a double-clicked or "Open With"-launched document as a
+// QFileOpenEvent (an Apple Event under the hood), not as a command-line
+// argument. On a cold launch that event can arrive before the engine and
+// Backend exist, so we buffer it and drain the buffer once they're ready.
+class OmawriteApplication : public QApplication {
+    Q_OBJECT
+
+public:
+    using QApplication::QApplication;
+
+    QVector<QUrl> takePendingOpenFiles() {
+        return std::exchange(m_pendingOpenFiles, {});
+    }
+
+signals:
+    void fileOpenRequested(const QUrl &url);
+
+protected:
+    bool event(QEvent *e) override {
+        if (e->type() == QEvent::FileOpen) {
+            const QUrl url = QUrl::fromLocalFile(static_cast<QFileOpenEvent *>(e)->file());
+            m_pendingOpenFiles.append(url);
+            emit fileOpenRequested(url);
+            return true;
+        }
+        return QApplication::event(e);
+    }
+
+private:
+    QVector<QUrl> m_pendingOpenFiles;
+};
+
 int main(int argc, char *argv[]) {
-    QApplication app(argc, argv);
+    OmawriteApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("omawrite"));
     app.setDesktopFileName(QStringLiteral("omawrite"));
     app.setWindowIcon(QIcon::fromTheme(QStringLiteral("omawrite")));
@@ -72,8 +107,21 @@ int main(int argc, char *argv[]) {
     backend.setParentWindow(qobject_cast<QWindow *>(engine.rootObjects().constFirst()));
 
     const QStringList args = app.arguments();
-    if (args.size() > 1 && !backend.modified())
+    if (args.size() > 1)
         backend.open(QUrl::fromLocalFile(args.at(1)));
+
+    // Drain any FileOpen events (e.g. Finder double-click) that arrived
+    // before the window and Backend existed, then keep handling later ones
+    // for as long as the app stays running. Opening a file always adds (or
+    // switches to) a tab, so there's no need to gate this on whether the
+    // current document has unsaved changes.
+    for (const QUrl &url : app.takePendingOpenFiles())
+        backend.open(url);
+
+    QObject::connect(&app, &OmawriteApplication::fileOpenRequested, &backend,
+                     &Backend::open);
 
     return app.exec();
 }
+
+#include "main.moc"

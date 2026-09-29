@@ -34,44 +34,51 @@ ApplicationWindow {
     property bool searchUpdating: false
     property var searchMatches: []
     property int searchMatchIndex: -1
-    property url pendingOpenUrl
-    property string pendingAction: ""
+    property int pendingCloseTabIndex: -1
+    property bool closingForQuit: false
     property bool replaceOpen: false
     property bool awaitingPendingSave: false
+    property bool previewMode: false
+    readonly property int tabStripHeight: scaledSize(34)
 
     Material.theme: darkMode ? Material.Dark : Material.Light
     Material.accent: backend.themeAccent
     color: pageColor
 
     onClosing: function(close) {
-        if (closeConfirmed || !backend.modified)
+        if (closeConfirmed || !backend.anyModified) {
+            closeConfirmed = true;
             return;
+        }
 
         close.accepted = false;
-        pendingAction = "close";
-        if (!unsavedChangesDialog.opened)
-            unsavedChangesDialog.open();
+        closingForQuit = true;
+        closeNextDirtyTab();
     }
 
-    function requestOpen(url) {
-        if (!backend.modified) {
-            backend.open(url);
+    // Closes tabs with unsaved changes one at a time (each one may prompt via
+    // unsavedChangesDialog through backend's tabCloseNeedsConfirmation signal),
+    // then actually closes the window once none are left.
+    function closeNextDirtyTab() {
+        var tabs = backend.tabsInfo;
+        for (var i = 0; i < tabs.length; i++) {
+            if (tabs[i].modified) {
+                backend.closeTab(i);
+                return;
+            }
+        }
+        closeConfirmed = true;
+        close();
+    }
+
+    function finishPendingTabClose() {
+        var index = pendingCloseTabIndex;
+        pendingCloseTabIndex = -1;
+        if (index < 0)
             return;
-        }
-        pendingOpenUrl = url;
-        pendingAction = "open";
-        unsavedChangesDialog.open();
-    }
-
-    function completePendingAction() {
-        var action = pendingAction;
-        pendingAction = "";
-        if (action === "close") {
-            closeConfirmed = true;
-            close();
-        } else if (action === "open") {
-            backend.open(pendingOpenUrl);
-        }
+        backend.forceCloseTab(index);
+        if (closingForQuit)
+            closeNextDirtyTab();
     }
 
     FontMetrics {
@@ -237,6 +244,36 @@ ApplicationWindow {
         onActivated: win.moveSearch(1)
     }
 
+    Shortcut {
+        sequence: "Ctrl+E"
+        context: Qt.ApplicationShortcut
+        onActivated: win.previewMode = !win.previewMode
+    }
+
+    Shortcut {
+        sequence: "Ctrl+T"
+        context: Qt.ApplicationShortcut
+        onActivated: backend.newTab()
+    }
+
+    Shortcut {
+        sequence: "Ctrl+W"
+        context: Qt.ApplicationShortcut
+        onActivated: backend.closeTab(backend.activeTabIndex)
+    }
+
+    Shortcut {
+        sequence: "Ctrl+Tab"
+        context: Qt.ApplicationShortcut
+        onActivated: backend.switchTab((backend.activeTabIndex + 1) % backend.tabsInfo.length)
+    }
+
+    Shortcut {
+        sequence: "Ctrl+Shift+Tab"
+        context: Qt.ApplicationShortcut
+        onActivated: backend.switchTab((backend.activeTabIndex - 1 + backend.tabsInfo.length) % backend.tabsInfo.length)
+    }
+
     Connections {
         target: backend
 
@@ -255,15 +292,23 @@ ApplicationWindow {
         }
 
         function onSaveSucceeded() {
-            win.awaitingPendingSave = false;
-            if (win.pendingAction !== "")
-                win.completePendingAction();
+            if (win.awaitingPendingSave) {
+                win.awaitingPendingSave = false;
+                win.finishPendingTabClose();
+            }
         }
 
         function onExternalChangeDetected(deleted, locallyModified) {
             externalChangeDialog.deleted = deleted;
             externalChangeDialog.locallyModified = locallyModified;
             externalChangeDialog.open();
+        }
+
+        function onTabCloseNeedsConfirmation(index) {
+            win.pendingCloseTabIndex = index;
+            if (index !== backend.activeTabIndex)
+                backend.switchTab(index);
+            unsavedChangesDialog.open();
         }
     }
 
@@ -272,7 +317,7 @@ ApplicationWindow {
         title: "Open File"
         fileMode: Dialogs.FileDialog.OpenFile
         nameFilters: ["Markdown files (*.md *.markdown)", "All files (*)"]
-        onAccepted: win.requestOpen(selectedFile)
+        onAccepted: backend.open(selectedFile)
     }
 
     Dialogs.FileDialog {
@@ -284,7 +329,8 @@ ApplicationWindow {
         onRejected: {
             backend.fileDialogCanceled();
             win.awaitingPendingSave = false;
-            win.pendingAction = "";
+            win.pendingCloseTabIndex = -1;
+            win.closingForQuit = false;
         }
     }
 
@@ -301,14 +347,17 @@ ApplicationWindow {
 
         onDiscardRequested: {
             backend.discardRecovery();
-            win.completePendingAction();
+            win.finishPendingTabClose();
         }
 
         onSaveRequested: {
             win.awaitingPendingSave = true;
             backend.save();
         }
-        onCancelRequested: win.pendingAction = ""
+        onCancelRequested: {
+            win.pendingCloseTabIndex = -1;
+            win.closingForQuit = false;
+        }
     }
 
     ExternalChangeDialog {
@@ -331,7 +380,7 @@ ApplicationWindow {
         standardButtons: Dialog.Close
         anchors.centerIn: parent
         contentItem: Label {
-            text: "Ctrl+S  Save\nCtrl+Shift+S  Save As\nCtrl+O  Open\nCtrl+N  New Window\nCtrl+F  Find\nCtrl+H  Find and Replace\nCtrl+B  Bold\nCtrl+I  Italic\nCtrl+K  Link\nCtrl+P  Print\nF11 / Super+F  Fullscreen\nCtrl+?  Shortcuts"
+            text: "Ctrl+S  Save\nCtrl+Shift+S  Save As\nCtrl+O  Open\nCtrl+N  New Window\nCtrl+T  New Tab\nCtrl+W  Close Tab\nCtrl+Tab  Next Tab\nCtrl+Shift+Tab  Previous Tab\nCtrl+F  Find\nCtrl+H  Find and Replace\nCtrl+B  Bold\nCtrl+I  Italic\nCtrl+K  Link\nCtrl+E  Toggle formatted view\nCtrl+P  Print\nF11 / Super+F  Fullscreen\nCtrl+?  Shortcuts"
             lineHeight: 1.5
         }
     }
@@ -339,11 +388,110 @@ ApplicationWindow {
     Item {
         anchors.fill: parent
 
+        Rectangle {
+            id: tabStrip
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            height: win.tabStripHeight
+            color: "transparent"
+
+            Flickable {
+                id: tabStripFlick
+                anchors.left: parent.left
+                anchors.right: newTabButton.left
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                anchors.leftMargin: 8
+                contentWidth: tabRow.width
+                contentHeight: height
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+
+                Row {
+                    id: tabRow
+                    height: parent.height
+                    spacing: 2
+
+                    Repeater {
+                        model: backend.tabsInfo
+
+                        Rectangle {
+                            id: tabDelegate
+                            required property var modelData
+                            required property int index
+                            readonly property bool isActive: index === backend.activeTabIndex
+
+                            width: Math.min(220, Math.max(90, tabLabel.implicitWidth + 34))
+                            height: win.scaledSize(28)
+                            anchors.verticalCenter: parent.verticalCenter
+                            radius: 6
+                            color: isActive
+                                ? (win.darkMode ? "#2a2a26" : "#efeee6")
+                                : "transparent"
+
+                            MouseArea {
+                                anchors.fill: parent
+                                anchors.rightMargin: 20
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.switchTab(tabDelegate.index)
+                            }
+
+                            Label {
+                                id: tabLabel
+                                anchors.left: parent.left
+                                anchors.right: closeTabButton.left
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.leftMargin: 12
+                                anchors.rightMargin: 4
+                                elide: Text.ElideRight
+                                text: (tabDelegate.modelData.modified ? "• " : "")
+                                    + tabDelegate.modelData.fileName
+                                color: tabDelegate.isActive ? win.strongTextColor : win.mutedColor
+                                font.family: "iA Writer Mono S"
+                                font.pixelSize: win.scaledSize(12)
+                            }
+
+                            Label {
+                                id: closeTabButton
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.rightMargin: 8
+                                text: "×"
+                                color: win.mutedColor
+                                font.pixelSize: win.scaledSize(14)
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    anchors.margins: -6
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: backend.closeTab(tabDelegate.index)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            FooterIconButton {
+                id: newTabButton
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.rightMargin: 24
+                iconName: "newTab"
+                iconColor: win.mutedColor
+                tooltip: "New tab"
+                onClicked: backend.newTab()
+            }
+        }
+
         Flickable {
             id: editorFlick
+            visible: !win.previewMode
             anchors.fill: parent
             anchors.leftMargin: 24
             anchors.rightMargin: 24
+            anchors.topMargin: win.tabStripHeight
             clip: true
             contentWidth: width
             contentHeight: Math.max(height, editor.y + editor.implicitHeight + 220)
@@ -796,6 +944,38 @@ ApplicationWindow {
             }
         }
 
+        ScrollView {
+            id: previewScroll
+            anchors.fill: parent
+            anchors.leftMargin: 24
+            anchors.rightMargin: 24
+            anchors.topMargin: win.tabStripHeight
+            anchors.bottomMargin: 32
+            clip: true
+            visible: win.previewMode
+
+            TextEdit {
+                id: previewText
+                objectName: "previewEditor"
+                x: Math.round((previewScroll.availableWidth - width) / 2)
+                width: win.editorWidth
+                topPadding: Math.max(42, Math.round(win.height * 0.05))
+                bottomPadding: 96
+                readOnly: true
+                selectByMouse: true
+                wrapMode: TextEdit.Wrap
+                textFormat: TextEdit.MarkdownText
+                text: editor.text
+                color: win.textColor
+                selectedTextColor: win.strongTextColor
+                selectionColor: win.selectionFill
+                font.family: "iA Writer Mono S"
+                font.pixelSize: win.editorFontPixelSize
+                font.weight: Font.Normal
+                renderType: Screen.devicePixelRatio % 1 === 0 ? TextEdit.NativeRendering : TextEdit.QtRendering
+            }
+        }
+
         Row {
             id: footerStatus
             anchors.left: parent.left
@@ -819,6 +999,14 @@ ApplicationWindow {
                 iconColor: win.mutedColor
                 tooltip: "Open"
                 onClicked: backend.openDialog()
+            }
+
+            FooterIconButton {
+                objectName: "previewButton"
+                iconName: "preview"
+                iconColor: win.previewMode ? win.strongTextColor : win.mutedColor
+                tooltip: win.previewMode ? "Edit" : "View formatted"
+                onClicked: win.previewMode = !win.previewMode
             }
 
             Label {
@@ -851,7 +1039,7 @@ ApplicationWindow {
             anchors.top: parent.top
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.topMargin: 12
+            anchors.topMargin: win.tabStripHeight + 12
             anchors.leftMargin: 12
             anchors.rightMargin: 12
             height: win.scaledSize(win.replaceOpen ? 104 : 56)

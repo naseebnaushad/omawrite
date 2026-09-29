@@ -8,6 +8,7 @@
 #include <QTimer>
 #include <QUrl>
 #include <QVariantList>
+#include <QVector>
 #include <memory>
 
 class MarkdownHighlighter;
@@ -15,11 +16,26 @@ class QTextDocument;
 class QWindow;
 class QLockFile;
 
+// One open document's state while it is not the active tab. The active tab's
+// authoritative state lives in Backend's own fields (m_fileUrl, m_document,
+// m_modified, ...); syncActiveTabState() copies it in here before switching
+// away, and activateTab() copies it back out.
+struct TabData {
+    QUrl fileUrl;
+    QString text;
+    bool modified = false;
+    QByteArray lastKnownFileContents;
+    bool hasKnownFileContents = false;
+};
+
 class Backend : public QObject {
     Q_OBJECT
     Q_PROPERTY(QUrl fileUrl READ fileUrl NOTIFY fileUrlChanged)
     Q_PROPERTY(QString fileName READ fileName NOTIFY fileUrlChanged)
     Q_PROPERTY(bool modified READ modified NOTIFY modifiedChanged)
+    Q_PROPERTY(bool anyModified READ anyModified NOTIFY tabsChanged)
+    Q_PROPERTY(QVariantList tabsInfo READ tabsInfo NOTIFY tabsChanged)
+    Q_PROPERTY(int activeTabIndex READ activeTabIndex NOTIFY tabsChanged)
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(int wordCount READ wordCount NOTIFY wordCountChanged)
     Q_PROPERTY(bool darkMode READ darkMode WRITE setDarkMode NOTIFY darkModeChanged)
@@ -39,6 +55,9 @@ public:
     QString fileName() const;
 
     bool modified() const { return m_modified; }
+    bool anyModified() const;
+    QVariantList tabsInfo() const;
+    int activeTabIndex() const { return m_activeTab; }
     QString status() const { return m_status; }
     int wordCount() const { return m_wordCount; }
     bool darkMode() const { return m_darkMode; }
@@ -66,6 +85,10 @@ public:
     Q_INVOKABLE void keepExternalVersion();
     Q_INVOKABLE void printDocument();
     Q_INVOKABLE void newWindow();
+    Q_INVOKABLE void newTab();
+    Q_INVOKABLE void switchTab(int index);
+    Q_INVOKABLE void closeTab(int index);
+    Q_INVOKABLE void forceCloseTab(int index);
     Q_INVOKABLE QString clipboardUrl() const;
     Q_INVOKABLE QString clipboardText() const;
     Q_INVOKABLE bool editorTextChanged();
@@ -88,6 +111,8 @@ signals:
     void saveDialogRequested(const QUrl &suggestedUrl);
     void saveSucceeded();
     void externalChangeDetected(bool deleted, bool locallyModified);
+    void tabsChanged();
+    void tabCloseNeedsConfirmation(int index);
 
 private:
     void loadDocumentText(const QString &text);
@@ -110,6 +135,13 @@ private:
     void watchCurrentFile();
     void loadOmarchyTheme();
     void watchOmarchyTheme();
+    void syncActiveTabState();
+    void activateTab(int index);
+    void removeTab(int index);
+    QString tabFileName(int index) const;
+
+    QVector<TabData> m_tabs;
+    int m_activeTab = -1;
 
     QUrl m_fileUrl;
     bool m_modified = false;
