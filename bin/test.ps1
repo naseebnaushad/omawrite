@@ -10,7 +10,7 @@ try {
     $env:QT_QPA_PLATFORM = 'offscreen'
     $exe = Get-ChildItem -Recurse -Filter tst_omawrite.exe | Select-Object -First 1
     if (-not $exe) { throw 'tst_omawrite.exe was not found.' }
-    Invoke-Checked $exe.FullName @()
+    Invoke-Checked $exe.FullName @('-o', '-,txt')
 } finally {
     Pop-Location
 }
