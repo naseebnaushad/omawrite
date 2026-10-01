@@ -54,6 +54,29 @@ Item {
                 context.lineTo(4.5, 9.5);
                 context.lineTo(11.5, 9.5);
                 context.lineTo(11.5, 13.5);
+            } else if (control.iconName === "newTab") {
+                context.moveTo(8, 2.5);
+                context.lineTo(8, 13.5);
+                context.moveTo(2.5, 8);
+                context.lineTo(13.5, 8);
+            } else if (control.iconName === "split") {
+                context.rect(2.5, 2.5, 11, 11);
+                context.moveTo(8, 2.5);
+                context.lineTo(8, 13.5);
+            } else if (control.iconName === "closeSplit") {
+                context.moveTo(4, 4);
+                context.lineTo(12, 12);
+                context.moveTo(12, 4);
+                context.lineTo(4, 12);
+            } else if (control.iconName === "preview") {
+                context.moveTo(1.5, 8);
+                context.bezierCurveTo(3, 3.5, 6, 3, 8, 3);
+                context.bezierCurveTo(10, 3, 13, 3.5, 14.5, 8);
+                context.bezierCurveTo(13, 12.5, 10, 13, 8, 13);
+                context.bezierCurveTo(6, 13, 3, 12.5, 1.5, 8);
+                context.closePath();
+                context.moveTo(10.5, 8);
+                context.arc(8, 8, 2.5, 0, Math.PI * 2);
             } else {
                 context.moveTo(2.5, 13);
                 context.lineTo(2.5, 3.5);

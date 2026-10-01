@@ -24,6 +24,7 @@ macos {
     QMAKE_TARGET_BUNDLE_PREFIX = io.omacom
     QMAKE_BUNDLE_DISPLAY_NAME = Omawrite
     QMAKE_APPLICATION_BUNDLE_NAME = Omawrite
+    QMAKE_INFO_PLIST = macos/Info.plist
 }
 
 win32 {
