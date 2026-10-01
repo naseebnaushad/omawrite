@@ -104,7 +104,7 @@ private slots:
         Backend backend;
         QSignalSpy externalChangeSpy(&backend, &Backend::externalChangeDetected);
 
-        backend.saveAs(QUrl::fromLocalFile(path));
+        backend.saveAs(0, QUrl::fromLocalFile(path));
         QVERIFY(QFileInfo::exists(path));
 
         QFile sameContents(path);
@@ -182,7 +182,7 @@ private slots:
         QScopedPointer<QObject> window(component.create());
         QVERIFY2(window, qPrintable(component.errorString()));
 
-        QVERIFY(window->findChild<QObject *>(QStringLiteral("sourceEditor")));
+        QVERIFY(window->findChild<QObject *>(QStringLiteral("sourceEditor0")));
         QVERIFY(!window->findChild<QObject *>(QStringLiteral("renderedPreview")));
         QVERIFY(!window->findChild<QObject *>(QStringLiteral("modeToggle")));
 
@@ -212,7 +212,7 @@ private slots:
         QScopedPointer<QObject> window(component.create());
         QVERIFY2(window, qPrintable(component.errorString()));
 
-        QObject *editor = window->findChild<QObject *>(QStringLiteral("sourceEditor"));
+        QObject *editor = window->findChild<QObject *>(QStringLiteral("sourceEditor0"));
         QVERIFY(editor);
         QCOMPARE(editor->property("font").value<QFont>().pixelSize(), 20);
 
@@ -232,14 +232,14 @@ private slots:
 
         const QString savedPath = saveDirectory.filePath(QStringLiteral("first.md"));
         Backend savedDocument;
-        savedDocument.saveAs(QUrl::fromLocalFile(savedPath));
+        savedDocument.saveAs(0, QUrl::fromLocalFile(savedPath));
 
         Backend nextDocument;
         QSignalSpy saveDialogSpy(&nextDocument, &Backend::saveDialogRequested);
-        nextDocument.saveAsDialog();
+        nextDocument.saveAsDialog(0);
         QCOMPARE(saveDialogSpy.count(), 1);
 
-        const QUrl suggestedUrl = saveDialogSpy.takeFirst().constFirst().toUrl();
+        const QUrl suggestedUrl = saveDialogSpy.takeFirst().at(1).toUrl();
         QCOMPARE(QFileInfo(suggestedUrl.toLocalFile()).absolutePath(),
                  saveDirectory.path());
         QCOMPARE(QFileInfo(suggestedUrl.toLocalFile()).fileName(),
@@ -249,8 +249,8 @@ private slots:
                              saveDirectory.filePath(QStringLiteral("missing")));
         Backend fallbackDocument;
         QSignalSpy fallbackDialogSpy(&fallbackDocument, &Backend::saveDialogRequested);
-        fallbackDocument.saveAsDialog();
-        const QUrl fallbackUrl = fallbackDialogSpy.takeFirst().constFirst().toUrl();
+        fallbackDocument.saveAsDialog(0);
+        const QUrl fallbackUrl = fallbackDialogSpy.takeFirst().at(1).toUrl();
         QCOMPARE(QFileInfo(fallbackUrl.toLocalFile()).absolutePath(), QDir::homePath());
     }
 

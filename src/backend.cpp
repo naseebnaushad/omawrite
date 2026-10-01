@@ -16,6 +16,7 @@
 #include <QRegularExpression>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLockFile>
@@ -30,6 +31,7 @@
 #include <QWindow>
 
 #include <algorithm>
+#include <utility>
 
 #include "markdownhighlighter.h"
 
@@ -91,30 +93,38 @@ Backend::Backend(QObject *parent) : QObject(parent) {
             }
         }
     }
-    m_wordCountTimer.setSingleShot(true);
-    m_wordCountTimer.setInterval(120);
-    connect(&m_wordCountTimer, &QTimer::timeout, this, &Backend::refreshWordCount);
+    for (int pn = 0; pn < 2; ++pn) {
+        m_wordCountTimer[pn].setSingleShot(true);
+        m_wordCountTimer[pn].setInterval(120);
+        connect(&m_wordCountTimer[pn], &QTimer::timeout, this,
+                [this, pn]() { refreshWordCount(pn); });
+    }
     m_recoveryTimer.setSingleShot(true);
     m_recoveryTimer.setInterval(750);
     connect(&m_recoveryTimer, &QTimer::timeout, this, &Backend::writeRecovery);
     connect(&m_fileWatcher, &QFileSystemWatcher::fileChanged, this,
             [this](const QString &path) {
-                if (path != m_fileUrl.toLocalFile())
-                    return;
+                for (int pn = 0; pn < paneCount(); ++pn) {
+                    PaneState &p = m_panes[pn];
+                    if (path != p.fileUrl.toLocalFile())
+                        continue;
 
-                const bool deleted = !QFileInfo::exists(path);
-                if (!deleted && m_hasKnownFileContents) {
-                    QFile file(path);
-                    if (file.open(QIODevice::ReadOnly)
-                            && file.readAll() == m_lastKnownFileContents) {
-                        // Atomic saves can replace the watched inode. Re-arm the
-                        // watcher, but do not report our own save as an outside edit.
-                        watchCurrentFile();
-                        return;
+                    const bool deleted = !QFileInfo::exists(path);
+                    if (!deleted && p.hasKnownFileContents) {
+                        QFile file(path);
+                        if (file.open(QIODevice::ReadOnly)
+                                && file.readAll() == p.lastKnownFileContents) {
+                            // Atomic saves can replace the watched inode.
+                            // Re-arm the watcher, but do not report our own
+                            // save as an outside edit.
+                            watchFiles();
+                            return;
+                        }
                     }
-                }
 
-                emit externalChangeDetected(deleted, m_modified);
+                    emit externalChangeDetected(pn, deleted, p.modified);
+                    return;
+                }
             });
 
     loadOmarchyTheme();
@@ -135,17 +145,34 @@ void Backend::setParentWindow(QWindow *window) {
     m_parentWindow = window;
 }
 
-QString Backend::fileName() const {
-    if (!m_fileUrl.isValid() || m_fileUrl.isEmpty())
+PaneState &Backend::pane(int index) {
+    return m_panes[qBound(0, index, 1)];
+}
+
+const PaneState &Backend::pane(int index) const {
+    return m_panes[qBound(0, index, 1)];
+}
+
+int Backend::paneShowingTab(int tabIndex) const {
+    for (int i = 0; i < 2; ++i) {
+        if (m_panes[i].activeTab == tabIndex)
+            return i;
+    }
+    return -1;
+}
+
+QString Backend::paneFileName(int paneIndex) const {
+    const PaneState &p = pane(paneIndex);
+    if (!p.fileUrl.isValid() || p.fileUrl.isEmpty())
         return QStringLiteral("Untitled.md");
 
-    if (m_fileUrl.isLocalFile()) {
-        const QFileInfo info(m_fileUrl.toLocalFile());
+    if (p.fileUrl.isLocalFile()) {
+        const QFileInfo info(p.fileUrl.toLocalFile());
         if (!info.fileName().isEmpty())
             return info.fileName();
     }
 
-    const QString name = m_fileUrl.fileName();
+    const QString name = p.fileUrl.fileName();
     return name.isEmpty() ? QStringLiteral("Untitled.md") : name;
 }
 
@@ -166,134 +193,219 @@ void Backend::setTextScale(qreal textScale) {
     emit textScaleChanged();
 }
 
-void Backend::attachDocument(QObject *textDocument) {
+void Backend::setFocusedPane(int paneIndex) {
+    paneIndex = qBound(0, paneIndex, 1);
+    if (m_focusedPane == paneIndex)
+        return;
+    m_focusedPane = paneIndex;
+    emit focusedPaneChanged();
+}
+
+void Backend::setSplitView(bool enabled) {
+    if (m_splitView == enabled)
+        return;
+
+    if (!enabled) {
+        // The second pane's QML TextEdit is about to be torn down: fold its
+        // state back into the shared tab list before it goes away.
+        syncPaneTabState(1);
+        PaneState &p1 = m_panes[1];
+        if (p1.highlighter)
+            delete p1.highlighter.data();
+        p1 = PaneState{};
+        if (m_focusedPane == 1)
+            setFocusedPane(0);
+    }
+
+    m_splitView = enabled;
+    emit splitViewChanged();
+    emit panesChanged();
+}
+
+void Backend::attachDocument(int paneIndex, QObject *textDocument) {
+    paneIndex = qBound(0, paneIndex, 1);
     auto *quickDocument = qobject_cast<QQuickTextDocument *>(textDocument);
     if (!quickDocument || !quickDocument->textDocument()) {
-        setStatus(QStringLiteral("Could not attach the Markdown renderer."));
+        setPaneStatus(paneIndex, QStringLiteral("Could not attach the Markdown renderer."));
         return;
     }
 
-    if (m_highlighter)
-        delete m_highlighter.data();
+    PaneState &p = m_panes[paneIndex];
+    if (p.highlighter)
+        delete p.highlighter.data();
 
-    m_document = quickDocument->textDocument();
-    m_lastDocumentText = m_document->toPlainText();
-    m_highlighter = new MarkdownHighlighter(m_document);
-    m_highlighter->setDarkMode(m_darkMode);
-    m_highlighter->setColors(m_themeBackground, m_themeForeground, m_themeAccent);
+    p.document = quickDocument->textDocument();
+    p.lastDocumentText = p.document->toPlainText();
+    p.highlighter = new MarkdownHighlighter(p.document);
+    p.highlighter->setDarkMode(m_darkMode);
+    p.highlighter->setColors(m_themeBackground, m_themeForeground, m_themeAccent);
 
-    connect(m_document, &QTextDocument::contentsChange, this,
-            [this](int position, int, int charsAdded) {
-                if (m_formattingTypography || m_loading)
+    connect(p.document, &QTextDocument::contentsChange, this,
+            [this, paneIndex](int position, int, int charsAdded) {
+                PaneState &pp = m_panes[paneIndex];
+                if (pp.formattingTypography || pp.loading)
                     return;
-                m_lastChangePos = position;
-                m_lastChangeAdded = charsAdded;
+                pp.lastChangePos = position;
+                pp.lastChangeAdded = charsAdded;
             });
 
-    applyDocumentTypography();
-    restoreRecovery();
+    applyDocumentTypography(paneIndex);
+
+    const bool firstEverAttach = m_tabs.isEmpty();
+    if (firstEverAttach) {
+        m_tabs.append(TabData{});
+        p.activeTab = 0;
+    } else if (p.activeTab < 0) {
+        // Pane just (re)created, e.g. split view was just turned on: give it
+        // a tab that isn't already live in the other pane, or a fresh one.
+        int candidate = -1;
+        for (int i = 0; i < m_tabs.size(); ++i) {
+            if (paneShowingTab(i) < 0) {
+                candidate = i;
+                break;
+            }
+        }
+        if (candidate < 0) {
+            m_tabs.append(TabData{});
+            candidate = m_tabs.size() - 1;
+        }
+        activateTabInPane(paneIndex, candidate);
+    }
+
+    if (firstEverAttach)
+        restoreRecovery();
+
+    emit tabsChanged();
+    emit panesChanged();
 }
 
-void Backend::openDialog() {
-    emit openDialogRequested();
+void Backend::openDialog(int paneIndex) {
+    emit openDialogRequested(qBound(0, paneIndex, 1));
 }
 
-void Backend::open(const QUrl &url) {
+void Backend::open(int paneIndex, const QUrl &url) {
+    paneIndex = qBound(0, paneIndex, 1);
     if (!url.isLocalFile()) {
-        setStatus(QStringLiteral("Only local files can be opened."));
+        setPaneStatus(paneIndex, QStringLiteral("Only local files can be opened."));
         return;
+    }
+
+    // Already open in some tab: just switch this pane to it instead of
+    // opening a second copy.
+    for (int i = 0; i < m_tabs.size(); ++i) {
+        const int livePane = paneShowingTab(i);
+        const QUrl tabUrl = livePane >= 0 ? m_panes[livePane].fileUrl : m_tabs.at(i).fileUrl;
+        if (tabUrl == url) {
+            switchTab(paneIndex, i);
+            return;
+        }
     }
 
     const QString targetName = QFileInfo(url.toLocalFile()).fileName();
     QFile file(url.toLocalFile());
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        setStatus(QStringLiteral("Could not open %1.").arg(targetName));
+        setPaneStatus(paneIndex, QStringLiteral("Could not open %1.").arg(targetName));
         return;
     }
 
     const QByteArray contents = file.readAll();
-    loadDocumentText(QString::fromUtf8(contents));
+    PaneState &p = m_panes[paneIndex];
+
+    // Reuse a single still-blank, never-touched tab (the common case: launch
+    // the app, then immediately open a file) instead of leaving it behind as
+    // a stray empty tab.
+    const bool reuseActiveTab = m_tabs.size() == 1 && p.activeTab == 0
+        && !p.modified && !p.fileUrl.isValid() && currentDocumentText(paneIndex).isEmpty();
+
+    if (!reuseActiveTab) {
+        syncPaneTabState(paneIndex);
+        m_tabs.append(TabData{});
+        activateTabInPane(paneIndex, m_tabs.size() - 1);
+    }
+
+    loadDocumentText(paneIndex, QString::fromUtf8(contents));
+    p.lastKnownFileContents = contents;
+    p.hasKnownFileContents = true;
+    setPaneFileUrl(paneIndex, url);
+    watchFiles();
+    setPaneModified(paneIndex, false);
+    setPaneStatus(paneIndex, QStringLiteral("Opened %1").arg(targetName));
     clearRecovery();
-    m_lastKnownFileContents = contents;
-    m_hasKnownFileContents = true;
-    setFileUrl(url);
-    watchCurrentFile();
-    setModified(false);
-    setStatus(QStringLiteral("Opened %1").arg(fileName()));
+    emit tabsChanged();
+    emit panesChanged();
 }
 
-void Backend::save() {
-    if (!m_fileUrl.isValid() || m_fileUrl.isEmpty()) {
-        saveAsDialog();
+void Backend::save(int paneIndex) {
+    paneIndex = qBound(0, paneIndex, 1);
+    const PaneState &p = m_panes[paneIndex];
+    if (!p.fileUrl.isValid() || p.fileUrl.isEmpty()) {
+        saveAsDialog(paneIndex);
         return;
     }
 
-    saveTo(m_fileUrl);
+    saveTo(paneIndex, p.fileUrl);
 }
 
-void Backend::saveForClose() {
-    if (!m_modified) {
-        emit closeAfterSave();
-        return;
-    }
-
-    m_closeAfterSave = true;
-    save();
+void Backend::saveAsDialog(int paneIndex) {
+    paneIndex = qBound(0, paneIndex, 1);
+    emit saveDialogRequested(paneIndex, suggestedSaveUrl(paneIndex));
 }
 
-void Backend::saveAsDialog() {
-    emit saveDialogRequested(suggestedSaveUrl());
+void Backend::saveAs(int paneIndex, const QUrl &url) {
+    saveTo(qBound(0, paneIndex, 1), url);
 }
 
-void Backend::saveAs(const QUrl &url) {
-    saveTo(url);
-}
-
-void Backend::fileDialogCanceled() {
-    m_closeAfterSave = false;
+void Backend::fileDialogCanceled(int paneIndex) {
+    Q_UNUSED(paneIndex);
 }
 
 void Backend::discardRecovery() {
     clearRecovery();
 }
 
-void Backend::reloadFromDisk() {
-    if (m_fileUrl.isLocalFile())
-        open(m_fileUrl);
+void Backend::reloadFromDisk(int paneIndex) {
+    paneIndex = qBound(0, paneIndex, 1);
+    const QUrl url = m_panes[paneIndex].fileUrl;
+    if (url.isLocalFile())
+        open(paneIndex, url);
 }
 
-void Backend::keepExternalVersion() {
-    QFile file(m_fileUrl.toLocalFile());
+void Backend::keepExternalVersion(int paneIndex) {
+    paneIndex = qBound(0, paneIndex, 1);
+    PaneState &p = m_panes[paneIndex];
+    QFile file(p.fileUrl.toLocalFile());
     if (file.open(QIODevice::ReadOnly)) {
-        m_lastKnownFileContents = file.readAll();
-        m_hasKnownFileContents = true;
+        p.lastKnownFileContents = file.readAll();
+        p.hasKnownFileContents = true;
     } else {
-        m_lastKnownFileContents.clear();
-        m_hasKnownFileContents = false;
+        p.lastKnownFileContents.clear();
+        p.hasKnownFileContents = false;
     }
-    setModified(true);
+    setPaneModified(paneIndex, true);
     scheduleRecovery();
-    watchCurrentFile();
-    setStatus(QStringLiteral("Kept your version"));
+    watchFiles();
+    setPaneStatus(paneIndex, QStringLiteral("Kept your version"));
 }
 
-void Backend::printDocument() {
-    if (!m_document) {
-        setStatus(QStringLiteral("There is no document to print."));
+void Backend::printDocument(int paneIndex) {
+    paneIndex = qBound(0, paneIndex, 1);
+    PaneState &p = m_panes[paneIndex];
+    if (!p.document) {
+        setPaneStatus(paneIndex, QStringLiteral("There is no document to print."));
         return;
     }
 
     QPrinter printer(QPrinter::HighResolution);
     QPrintDialog dialog(&printer);
-    dialog.setWindowTitle(QStringLiteral("Print %1").arg(fileName()));
+    dialog.setWindowTitle(QStringLiteral("Print %1").arg(paneFileName(paneIndex)));
     dialog.winId();
     if (dialog.windowHandle() && m_parentWindow)
         dialog.windowHandle()->setTransientParent(m_parentWindow);
 
     if (dialog.exec() == QDialog::Accepted) {
         QTextDocument rendered;
-        rendered.setDefaultFont(m_document->defaultFont());
-        rendered.setMarkdown(currentDocumentText());
+        rendered.setDefaultFont(p.document->defaultFont());
+        rendered.setMarkdown(currentDocumentText(paneIndex));
         rendered.print(&printer);
     }
 }
@@ -302,7 +414,201 @@ void Backend::newWindow() {
     const bool started = QProcess::startDetached(QCoreApplication::applicationFilePath(),
                                                  QStringList());
     if (!started)
-        setStatus(QStringLiteral("Could not open a new window."));
+        setPaneStatus(m_focusedPane, QStringLiteral("Could not open a new window."));
+}
+
+void Backend::newTab(int paneIndex) {
+    paneIndex = qBound(0, paneIndex, 1);
+    syncPaneTabState(paneIndex);
+    m_tabs.append(TabData{});
+    activateTabInPane(paneIndex, m_tabs.size() - 1);
+    emit tabsChanged();
+    emit panesChanged();
+}
+
+void Backend::switchTab(int paneIndex, int index) {
+    paneIndex = qBound(0, paneIndex, 1);
+    if (index < 0 || index >= m_tabs.size())
+        return;
+
+    const PaneState &p = m_panes[paneIndex];
+    if (index == p.activeTab)
+        return;
+
+    const int otherPane = 1 - paneIndex;
+    if (paneCount() == 2 && m_panes[otherPane].activeTab == index) {
+        // That tab is already live in the other pane: steal it, then give
+        // the other pane a different tab (or a fresh blank one).
+        syncPaneTabState(otherPane);
+        syncPaneTabState(paneIndex);
+        activateTabInPane(paneIndex, index);
+
+        int candidate = -1;
+        for (int i = 0; i < m_tabs.size(); ++i) {
+            if (paneShowingTab(i) < 0) {
+                candidate = i;
+                break;
+            }
+        }
+        if (candidate < 0) {
+            m_tabs.append(TabData{});
+            candidate = m_tabs.size() - 1;
+        }
+        activateTabInPane(otherPane, candidate);
+    } else {
+        syncPaneTabState(paneIndex);
+        activateTabInPane(paneIndex, index);
+    }
+
+    emit tabsChanged();
+    emit panesChanged();
+}
+
+void Backend::closeTab(int index) {
+    if (index < 0 || index >= m_tabs.size())
+        return;
+
+    const int livePane = paneShowingTab(index);
+    if (livePane >= 0)
+        syncPaneTabState(livePane);
+
+    if (m_tabs.at(index).modified) {
+        emit tabCloseNeedsConfirmation(livePane >= 0 ? livePane : m_focusedPane, index);
+        return;
+    }
+
+    removeTab(index);
+}
+
+void Backend::forceCloseTab(int index) {
+    removeTab(index);
+}
+
+bool Backend::anyModified() const {
+    for (int i = 0; i < m_tabs.size(); ++i) {
+        if (tabDisplayModified(i))
+            return true;
+    }
+    return false;
+}
+
+QString Backend::tabFileName(int index) const {
+    if (index < 0 || index >= m_tabs.size())
+        return QStringLiteral("Untitled.md");
+
+    const QUrl &url = m_tabs.at(index).fileUrl;
+    if (!url.isValid() || url.isEmpty())
+        return QStringLiteral("Untitled.md");
+    const QString name = QFileInfo(url.toLocalFile()).fileName();
+    return name.isEmpty() ? QStringLiteral("Untitled.md") : name;
+}
+
+QString Backend::tabDisplayFileName(int index) const {
+    const int livePane = paneShowingTab(index);
+    return livePane >= 0 ? paneFileName(livePane) : tabFileName(index);
+}
+
+bool Backend::tabDisplayModified(int index) const {
+    const int livePane = paneShowingTab(index);
+    if (livePane >= 0)
+        return m_panes[livePane].modified;
+    if (index < 0 || index >= m_tabs.size())
+        return false;
+    return m_tabs.at(index).modified;
+}
+
+QVariantList Backend::paneInfo() const {
+    QVariantList result;
+    for (int pn = 0; pn < paneCount(); ++pn) {
+        const PaneState &p = m_panes[pn];
+
+        QVariantList tabs;
+        for (int i = 0; i < m_tabs.size(); ++i) {
+            tabs.append(QVariantMap{
+                {QStringLiteral("fileName"), tabDisplayFileName(i)},
+                {QStringLiteral("modified"), tabDisplayModified(i)},
+                {QStringLiteral("active"), i == p.activeTab},
+            });
+        }
+
+        result.append(QVariantMap{
+            {QStringLiteral("fileUrl"), p.fileUrl},
+            {QStringLiteral("fileName"), paneFileName(pn)},
+            {QStringLiteral("modified"), p.modified},
+            {QStringLiteral("wordCount"), p.wordCount},
+            {QStringLiteral("status"), p.status},
+            {QStringLiteral("activeTabIndex"), p.activeTab},
+            {QStringLiteral("tabs"), tabs},
+        });
+    }
+    return result;
+}
+
+void Backend::syncPaneTabState(int paneIndex) {
+    PaneState &p = pane(paneIndex);
+    if (p.activeTab < 0 || p.activeTab >= m_tabs.size())
+        return;
+
+    TabData &tab = m_tabs[p.activeTab];
+    tab.fileUrl = p.fileUrl;
+    tab.text = currentDocumentText(paneIndex);
+    tab.modified = p.modified;
+    tab.lastKnownFileContents = p.lastKnownFileContents;
+    tab.hasKnownFileContents = p.hasKnownFileContents;
+}
+
+void Backend::activateTabInPane(int paneIndex, int index) {
+    if (index < 0 || index >= m_tabs.size())
+        return;
+
+    PaneState &p = pane(paneIndex);
+    const TabData &tab = m_tabs.at(index);
+    p.activeTab = index;
+
+    setPaneFileUrl(paneIndex, tab.fileUrl);
+    loadDocumentText(paneIndex, tab.text);
+    p.lastKnownFileContents = tab.lastKnownFileContents;
+    p.hasKnownFileContents = tab.hasKnownFileContents;
+    watchFiles();
+    setPaneModified(paneIndex, tab.modified);
+    setPaneStatus(paneIndex, QString());
+}
+
+void Backend::removeTab(int index) {
+    if (index < 0 || index >= m_tabs.size())
+        return;
+
+    m_tabs.remove(index);
+
+    for (int pn = 0; pn < 2; ++pn) {
+        PaneState &p = m_panes[pn];
+        if (p.activeTab == index)
+            p.activeTab = -1;
+        else if (p.activeTab > index)
+            --p.activeTab;
+    }
+
+    if (m_tabs.isEmpty())
+        m_tabs.append(TabData{});
+
+    for (int pn = 0; pn < paneCount(); ++pn) {
+        if (m_panes[pn].activeTab >= 0)
+            continue;
+        int candidate = -1;
+        for (int i = 0; i < m_tabs.size(); ++i) {
+            if (paneShowingTab(i) < 0) {
+                candidate = i;
+                break;
+            }
+        }
+        if (candidate < 0)
+            candidate = 0;
+        activateTabInPane(pn, candidate);
+    }
+
+    writeRecovery();
+    emit tabsChanged();
+    emit panesChanged();
 }
 
 QString Backend::clipboardUrl() const {
@@ -338,36 +644,39 @@ QString Backend::clipboardText() const {
     return mimeData && mimeData->hasText() ? mimeData->text() : QString();
 }
 
-bool Backend::editorTextChanged() {
-    if (m_loading || m_formattingTypography)
+bool Backend::editorTextChanged(int paneIndex) {
+    paneIndex = qBound(0, paneIndex, 1);
+    PaneState &p = m_panes[paneIndex];
+    if (p.loading || p.formattingTypography)
         return false;
 
-    const QString text = currentDocumentText();
-    if (text == m_lastDocumentText)
+    const QString text = currentDocumentText(paneIndex);
+    if (text == p.lastDocumentText)
         return false;
-    m_lastDocumentText = text;
+    p.lastDocumentText = text;
 
-    if (m_document) {
-        const int blockCount = m_document->blockCount();
-        if (blockCount > m_formattedBlockCount)
-            reapplyTypographyToChange();
-        m_formattedBlockCount = blockCount;
+    if (p.document) {
+        const int blockCount = p.document->blockCount();
+        if (blockCount > p.formattedBlockCount)
+            reapplyTypographyToChange(paneIndex);
+        p.formattedBlockCount = blockCount;
     }
 
-    scheduleWordCount();
-    setModified(true);
-    setStatus(QStringLiteral("Unsaved"));
+    scheduleWordCount(paneIndex);
+    setPaneModified(paneIndex, true);
+    setPaneStatus(paneIndex, QStringLiteral("Unsaved"));
     scheduleRecovery();
     return true;
 }
 
-QVariantList Backend::hiddenRangesAt(int position) const {
+QVariantList Backend::hiddenRangesAt(int paneIndex, int position) const {
     QVariantList ranges;
-    if (!m_document)
+    const PaneState &p = pane(paneIndex);
+    if (!p.document)
         return ranges;
 
     const QTextBlock block =
-        m_document->findBlock(qBound(0, position, m_document->characterCount() - 1));
+        p.document->findBlock(qBound(0, position, p.document->characterCount() - 1));
     if (!block.isValid())
         return ranges;
 
@@ -390,9 +699,10 @@ QVariantList Backend::hiddenRangesAt(int position) const {
     return ranges;
 }
 
-void Backend::setSearchHighlight(const QString &query, int currentMatchStart) {
-    if (m_highlighter)
-        m_highlighter->setSearch(query, currentMatchStart);
+void Backend::setSearchHighlight(int paneIndex, const QString &query, int currentMatchStart) {
+    PaneState &p = pane(paneIndex);
+    if (p.highlighter)
+        p.highlighter->setSearch(query, currentMatchStart);
 }
 
 void Backend::openExternalUrl(const QUrl &url) {
@@ -422,95 +732,97 @@ void Backend::saveWindowGeometry(int x, int y, int width, int height, bool maxim
     settings.setValue(QStringLiteral("window/maximized"), maximized);
 }
 
-void Backend::loadDocumentText(const QString &text) {
-    if (!m_document) {
-        setStatus(QStringLiteral("Could not attach the Markdown renderer."));
+void Backend::loadDocumentText(int paneIndex, const QString &text) {
+    PaneState &p = pane(paneIndex);
+    if (!p.document) {
+        setPaneStatus(paneIndex, QStringLiteral("Could not attach the Markdown renderer."));
         return;
     }
 
-    m_loading = true;
-    m_document->setPlainText(text);
-    m_lastDocumentText = text;
-    m_loading = false;
+    p.loading = true;
+    p.document->setPlainText(text);
+    p.lastDocumentText = text;
+    p.loading = false;
 
-    applyDocumentTypography();
-    m_wordCountTimer.stop();
-    setWordCount(countWords(text));
+    applyDocumentTypography(paneIndex);
+    m_wordCountTimer[qBound(0, paneIndex, 1)].stop();
+    setPaneWordCount(paneIndex, countWords(text));
 }
 
-void Backend::setFileUrl(const QUrl &url) {
-    if (m_fileUrl == url)
+void Backend::setPaneFileUrl(int paneIndex, const QUrl &url) {
+    PaneState &p = pane(paneIndex);
+    if (p.fileUrl == url)
         return;
 
-    m_fileUrl = url;
-    emit fileUrlChanged();
-    watchCurrentFile();
+    p.fileUrl = url;
+    watchFiles();
+    emit panesChanged();
 }
 
-void Backend::setModified(bool modified) {
-    if (m_modified == modified)
+void Backend::setPaneModified(int paneIndex, bool modified) {
+    PaneState &p = pane(paneIndex);
+    if (p.modified == modified)
         return;
 
-    m_modified = modified;
-    emit modifiedChanged();
+    p.modified = modified;
+    emit tabsChanged();
+    emit panesChanged();
 }
 
-void Backend::setStatus(const QString &status) {
-    if (m_status == status)
+void Backend::setPaneStatus(int paneIndex, const QString &status) {
+    PaneState &p = pane(paneIndex);
+    if (p.status == status)
         return;
 
-    m_status = status;
-    emit statusChanged();
+    p.status = status;
+    emit panesChanged();
 }
 
-void Backend::saveTo(const QUrl &url) {
+void Backend::saveTo(int paneIndex, const QUrl &url) {
+    paneIndex = qBound(0, paneIndex, 1);
+    PaneState &p = m_panes[paneIndex];
+
     if (!url.isLocalFile()) {
-        m_closeAfterSave = false;
-        setStatus(QStringLiteral("Only local files can be saved."));
+        setPaneStatus(paneIndex, QStringLiteral("Only local files can be saved."));
         return;
     }
 
     const QString targetName = QFileInfo(url.toLocalFile()).fileName();
     QSaveFile file(url.toLocalFile());
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        m_closeAfterSave = false;
-        setStatus(QStringLiteral("Could not save %1.").arg(targetName));
+        setPaneStatus(paneIndex, QStringLiteral("Could not save %1.").arg(targetName));
         return;
     }
 
-    const QByteArray contents = currentDocumentText().toUtf8();
+    const QByteArray contents = currentDocumentText(paneIndex).toUtf8();
     file.write(contents);
 
-    // QSaveFile commits by replacing the target. Stop watching the old inode
-    // before that replacement so our own write is not classified as external.
+    // QSaveFile commits by replacing the target. Stop watching every path
+    // before that replacement so our own write is not classified as
+    // external (both panes may be watching different files).
     const QStringList watched = m_fileWatcher.files();
     if (!watched.isEmpty())
         m_fileWatcher.removePaths(watched);
 
-    // commit() flushes, fsyncs, and atomically renames the temp file into place,
-    // returning false (and leaving the original untouched) on any write error.
+    // commit() flushes, fsyncs, and atomically renames the temp file into
+    // place, returning false (and leaving the original untouched) on any
+    // write error.
     if (!file.commit()) {
-        watchCurrentFile();
-        m_closeAfterSave = false;
-        setStatus(QStringLiteral("Could not write %1.").arg(targetName));
+        watchFiles();
+        setPaneStatus(paneIndex, QStringLiteral("Could not write %1.").arg(targetName));
         return;
     }
 
-    const bool shouldClose = m_closeAfterSave;
-    m_closeAfterSave = false;
-    m_lastKnownFileContents = contents;
-    m_hasKnownFileContents = true;
-    setFileUrl(url);
-    watchCurrentFile();
+    p.lastKnownFileContents = contents;
+    p.hasKnownFileContents = true;
+    setPaneFileUrl(paneIndex, url);
+    watchFiles();
     QSettings().setValue(lastSaveDirectorySetting,
                          QFileInfo(url.toLocalFile()).absolutePath());
-    setModified(false);
-    setStatus(QStringLiteral("Saved %1").arg(fileName()));
+    setPaneModified(paneIndex, false);
+    setPaneStatus(paneIndex, QStringLiteral("Saved %1").arg(paneFileName(paneIndex)));
     clearRecovery();
-    emit saveSucceeded();
-
-    if (shouldClose)
-        emit closeAfterSave();
+    emit saveSucceeded(paneIndex);
 }
 
 void Backend::scheduleRecovery() {
@@ -522,17 +834,31 @@ QString Backend::recoveryPath() const {
 }
 
 void Backend::writeRecovery() {
-    if (!m_modified)
-        return;
+    for (int pn = 0; pn < paneCount(); ++pn)
+        syncPaneTabState(pn);
+
     const QString path = recoveryPath();
     if (path.isEmpty())
         return;
+
+    QJsonArray tabsArray;
+    for (const TabData &tab : std::as_const(m_tabs)) {
+        if (!tab.modified)
+            continue;
+        tabsArray.append(QJsonObject{{QStringLiteral("fileUrl"), tab.fileUrl.toString()},
+                                     {QStringLiteral("text"), tab.text}});
+    }
+
+    if (tabsArray.isEmpty()) {
+        QFile::remove(path);
+        return;
+    }
+
     QDir().mkpath(QFileInfo(path).absolutePath());
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly))
         return;
-    const QJsonObject recovery{{QStringLiteral("fileUrl"), m_fileUrl.toString()},
-                               {QStringLiteral("text"), currentDocumentText()}};
+    const QJsonObject recovery{{QStringLiteral("tabs"), tabsArray}};
     file.write(QJsonDocument(recovery).toJson(QJsonDocument::Compact));
     file.commit();
 }
@@ -542,35 +868,58 @@ void Backend::restoreRecovery() {
     if (!file.open(QIODevice::ReadOnly))
         return;
     const QJsonDocument json = QJsonDocument::fromJson(file.readAll());
-    if (!json.isObject() || !json.object().contains(QStringLiteral("text")))
+    if (!json.isObject())
         return;
-    const QJsonObject recovery = json.object();
-    loadDocumentText(recovery.value(QStringLiteral("text")).toString());
-    const QUrl recoveredUrl(recovery.value(QStringLiteral("fileUrl")).toString());
-    QFile diskFile(recoveredUrl.toLocalFile());
-    if (recoveredUrl.isLocalFile() && diskFile.open(QIODevice::ReadOnly)) {
-        m_lastKnownFileContents = diskFile.readAll();
-        m_hasKnownFileContents = true;
-    } else {
-        m_lastKnownFileContents.clear();
-        m_hasKnownFileContents = false;
+
+    QJsonArray tabsArray = json.object().value(QStringLiteral("tabs")).toArray();
+    if (tabsArray.isEmpty()) {
+        // Older, single-document recovery file from before tabs existed.
+        if (!json.object().contains(QStringLiteral("text")))
+            return;
+        tabsArray.append(json.object());
     }
-    setFileUrl(recoveredUrl);
-    setModified(true);
-    setStatus(QStringLiteral("Recovered unsaved changes"));
+
+    QVector<TabData> recovered;
+    for (const QJsonValue &value : std::as_const(tabsArray)) {
+        const QJsonObject obj = value.toObject();
+        TabData tab;
+        tab.fileUrl = QUrl(obj.value(QStringLiteral("fileUrl")).toString());
+        tab.text = obj.value(QStringLiteral("text")).toString();
+        tab.modified = true;
+        QFile diskFile(tab.fileUrl.toLocalFile());
+        if (tab.fileUrl.isLocalFile() && diskFile.open(QIODevice::ReadOnly)) {
+            tab.lastKnownFileContents = diskFile.readAll();
+            tab.hasKnownFileContents = true;
+        }
+        recovered.append(tab);
+    }
+
+    if (recovered.isEmpty())
+        return;
+
+    m_tabs = recovered;
+    for (int pn = 0; pn < 2; ++pn)
+        m_panes[pn].activeTab = -1;
+    activateTabInPane(0, 0);
+    setPaneStatus(0, QStringLiteral("Recovered unsaved changes"));
 }
 
 void Backend::clearRecovery() {
     m_recoveryTimer.stop();
-    QFile::remove(recoveryPath());
+    // Rewrite (rather than unconditionally delete) the aggregate recovery
+    // file, since other tabs may still have unsaved changes worth keeping.
+    writeRecovery();
 }
 
-void Backend::watchCurrentFile() {
+void Backend::watchFiles() {
     const QStringList watched = m_fileWatcher.files();
     if (!watched.isEmpty())
         m_fileWatcher.removePaths(watched);
-    if (m_fileUrl.isLocalFile() && QFileInfo::exists(m_fileUrl.toLocalFile()))
-        m_fileWatcher.addPath(m_fileUrl.toLocalFile());
+    for (int pn = 0; pn < paneCount(); ++pn) {
+        const QUrl &url = m_panes[pn].fileUrl;
+        if (url.isLocalFile() && QFileInfo::exists(url.toLocalFile()))
+            m_fileWatcher.addPath(url.toLocalFile());
+    }
 }
 
 void Backend::loadOmarchyTheme() {
@@ -636,9 +985,11 @@ void Backend::loadOmarchyTheme() {
         emit darkModeChanged();
     }
 
-    if (m_highlighter) {
-        m_highlighter->setDarkMode(m_darkMode);
-        m_highlighter->setColors(m_themeBackground, m_themeForeground, m_themeAccent);
+    for (int pn = 0; pn < 2; ++pn) {
+        if (m_panes[pn].highlighter) {
+            m_panes[pn].highlighter->setDarkMode(m_darkMode);
+            m_panes[pn].highlighter->setColors(m_themeBackground, m_themeForeground, m_themeAccent);
+        }
     }
 
     emit themeColorsChanged();
@@ -662,20 +1013,22 @@ void Backend::watchOmarchyTheme() {
         m_themeWatcher.addPath(colorsPath);
 }
 
-QUrl Backend::suggestedSaveUrl() const {
-    if (m_fileUrl.isLocalFile())
-        return m_fileUrl;
+QUrl Backend::suggestedSaveUrl(int paneIndex) const {
+    const PaneState &p = pane(paneIndex);
+    if (p.fileUrl.isLocalFile())
+        return p.fileUrl;
 
     const QString savedDirectory = QSettings().value(lastSaveDirectorySetting).toString();
     const QDir directory = savedDirectory.isEmpty() || !QDir(savedDirectory).exists()
         ? QDir::home()
         : QDir(savedDirectory);
     return QUrl::fromLocalFile(
-        directory.filePath(suggestedFileName(currentDocumentText())));
+        directory.filePath(suggestedFileName(currentDocumentText(paneIndex))));
 }
 
-QString Backend::currentDocumentText() const {
-    return m_document ? m_document->toPlainText() : QString();
+QString Backend::currentDocumentText(int paneIndex) const {
+    const PaneState &p = pane(paneIndex);
+    return p.document ? p.document->toPlainText() : QString();
 }
 
 int Backend::countWords(const QString &text) {
@@ -710,24 +1063,26 @@ QString Backend::suggestedFileName(const QString &text) {
     return name;
 }
 
-void Backend::setWordCount(int words) {
-    if (m_wordCount == words)
+void Backend::setPaneWordCount(int paneIndex, int words) {
+    PaneState &p = pane(paneIndex);
+    if (p.wordCount == words)
         return;
 
-    m_wordCount = words;
-    emit wordCountChanged();
+    p.wordCount = words;
+    emit panesChanged();
 }
 
-void Backend::refreshWordCount() {
-    setWordCount(countWords(currentDocumentText()));
+void Backend::refreshWordCount(int paneIndex) {
+    setPaneWordCount(paneIndex, countWords(currentDocumentText(paneIndex)));
 }
 
-void Backend::scheduleWordCount() {
-    m_wordCountTimer.start();
+void Backend::scheduleWordCount(int paneIndex) {
+    m_wordCountTimer[qBound(0, paneIndex, 1)].start();
 }
 
-void Backend::applyDocumentTypography() {
-    if (!m_document)
+void Backend::applyDocumentTypography(int paneIndex) {
+    PaneState &p = pane(paneIndex);
+    if (!p.document)
         return;
 
     QTextBlockFormat blockFormat;
@@ -735,22 +1090,23 @@ void Backend::applyDocumentTypography() {
 
     // A full pass is only used for freshly loaded/attached documents, so it is
     // safe to drop undo history here (re-enabling clears the stack anyway).
-    const bool undoEnabled = m_document->isUndoRedoEnabled();
-    m_document->setUndoRedoEnabled(false);
+    const bool undoEnabled = p.document->isUndoRedoEnabled();
+    p.document->setUndoRedoEnabled(false);
 
-    m_formattingTypography = true;
-    QTextCursor cursor(m_document);
+    p.formattingTypography = true;
+    QTextCursor cursor(p.document);
     cursor.select(QTextCursor::Document);
     cursor.mergeBlockFormat(blockFormat);
-    m_formattingTypography = false;
+    p.formattingTypography = false;
 
-    m_document->setUndoRedoEnabled(undoEnabled);
+    p.document->setUndoRedoEnabled(undoEnabled);
 
-    m_formattedBlockCount = m_document->blockCount();
+    p.formattedBlockCount = p.document->blockCount();
 }
 
-void Backend::reapplyTypographyToChange() {
-    if (!m_document)
+void Backend::reapplyTypographyToChange(int paneIndex) {
+    PaneState &p = pane(paneIndex);
+    if (!p.document)
         return;
 
     QTextBlockFormat blockFormat;
@@ -759,16 +1115,16 @@ void Backend::reapplyTypographyToChange() {
     // Format only the block(s) touched by the last edit instead of the whole
     // document, and fold the change into the preceding edit command so a single
     // undo reverts both the text and its formatting.
-    const int maxPos = m_document->characterCount() - 1;
-    const int start = qBound(0, m_lastChangePos, maxPos);
-    const int end = qBound(start, m_lastChangePos + m_lastChangeAdded, maxPos);
+    const int maxPos = p.document->characterCount() - 1;
+    const int start = qBound(0, p.lastChangePos, maxPos);
+    const int end = qBound(start, p.lastChangePos + p.lastChangeAdded, maxPos);
 
-    m_formattingTypography = true;
-    QTextCursor cursor(m_document);
+    p.formattingTypography = true;
+    QTextCursor cursor(p.document);
     cursor.joinPreviousEditBlock();
     cursor.setPosition(start);
     cursor.setPosition(end, QTextCursor::KeepAnchor);
     cursor.mergeBlockFormat(blockFormat);
     cursor.endEditBlock();
-    m_formattingTypography = false;
+    p.formattingTypography = false;
 }
