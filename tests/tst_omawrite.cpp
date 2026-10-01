@@ -182,7 +182,7 @@ private slots:
         QScopedPointer<QObject> window(component.create());
         QVERIFY2(window, qPrintable(component.errorString()));
 
-        QVERIFY(window->findChild<QObject *>(QStringLiteral("sourceEditor")));
+        QVERIFY(window->findChild<QObject *>(QStringLiteral("sourceEditor0")));
         QVERIFY(!window->findChild<QObject *>(QStringLiteral("renderedPreview")));
         QVERIFY(!window->findChild<QObject *>(QStringLiteral("modeToggle")));
 
@@ -212,7 +212,7 @@ private slots:
         QScopedPointer<QObject> window(component.create());
         QVERIFY2(window, qPrintable(component.errorString()));
 
-        QObject *editor = window->findChild<QObject *>(QStringLiteral("sourceEditor"));
+        QObject *editor = window->findChild<QObject *>(QStringLiteral("sourceEditor0"));
         QVERIFY(editor);
         QCOMPARE(editor->property("font").value<QFont>().pixelSize(), 20);
 
