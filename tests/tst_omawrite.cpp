@@ -55,6 +55,9 @@ private slots:
     }
 
     void loadsCurrentOmarchyTheme() {
+#ifdef Q_OS_WIN
+        QSKIP("Omarchy is a Linux desktop; Qt resolves the Windows home directory via the shell, not HOME.");
+#endif
         QTemporaryDir homeDirectory;
         QVERIFY(homeDirectory.isValid());
 
