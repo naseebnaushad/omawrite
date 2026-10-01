@@ -836,6 +836,7 @@ FocusScope {
         opacity: 0.55
 
         FooterIconButton {
+            objectName: "saveButton"
             iconName: "save"
             iconColor: hostWindow.mutedColor
             tooltip: "Save"
@@ -843,6 +844,7 @@ FocusScope {
         }
 
         FooterIconButton {
+            objectName: "openButton"
             iconName: "open"
             iconColor: hostWindow.mutedColor
             tooltip: "Open"
