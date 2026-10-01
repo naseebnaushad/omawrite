@@ -10,7 +10,9 @@ try {
     $env:QT_QPA_PLATFORM = 'offscreen'
     $exe = Get-ChildItem -Recurse -Filter tst_omawrite.exe | Select-Object -First 1
     if (-not $exe) { throw 'tst_omawrite.exe was not found.' }
-    Invoke-Checked $exe.FullName @('-o', '-,txt')
+    $env:QT_DEBUG_PLUGINS = '1'
+    & $exe.FullName -o '-,txt' 2>&1 | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw ('tst_omawrite failed with exit code 0x{0:X}' -f $LASTEXITCODE) }
 } finally {
     Pop-Location
 }
