@@ -41,6 +41,30 @@ desktop portal or Omarchy theme to read from), and the app renders at its
 designed text size since macOS has no system-wide text-scaling knob equivalent
 to GNOME's.
 
+### Windows
+
+Install Qt 6 (the MSVC 2022 64-bit kit from the Qt Online Installer, including
+the Qt Quick Controls / Quick Dialogs modules), open an "x64 Native Tools
+Command Prompt for VS 2022" with `qmake6` on `PATH`, then build:
+
+```powershell
+.\bin\build.ps1
+```
+
+To build a self-contained zip (bundles the Qt DLLs via `windeployqt`, so it
+runs without Qt installed):
+
+```powershell
+.\bin\package.ps1
+```
+
+This produces `build\Omawrite-windows.zip`. Run `.\bin\test.ps1` for the tests.
+MinGW kits work too if `mingw32-make` is on `PATH`. The build is unsigned, so
+Windows SmartScreen may warn on first launch of a downloaded copy.
+
+On Windows, dark/light mode follows the system app theme, and the app renders at
+its designed text size. There is no XDG portal: file pickers are the native
+Windows dialogs. `Super+F` is reserved by Windows, so use `F11` for fullscreen.
 ## Shortcuts
 
 - `Ctrl+S` saves. Unsaved documents use the XDG desktop portal file picker.
@@ -67,6 +91,7 @@ Omawrite at the size it is designed around; larger and smaller sizes scale from 
 - Linux: Qt 6 (`qt6-base`, `qt6-declarative`, `qt6-quickcontrols2`), `xdg-desktop-portal`
   and a portal backend
 - macOS: Qt 6 via Homebrew (`brew install qt`), Xcode command line tools
+- Windows: Qt 6 (MSVC 2022 or MinGW kit) and the matching compiler
 
 The iA Writer Mono font is bundled under the SIL Open Font License 1.1; see
 `fonts/OFL.txt`. The font is copyright Information Architects Inc. and based on
