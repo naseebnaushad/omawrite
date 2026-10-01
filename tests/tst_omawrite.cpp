@@ -58,12 +58,17 @@ private slots:
         QTemporaryDir homeDirectory;
         QVERIFY(homeDirectory.isValid());
 
-        const QByteArray originalHome = qgetenv("HOME");
+        // QDir::homePath() reads HOME on Unix and USERPROFILE on Windows.
         struct HomeRestorer {
-            QByteArray value;
-            ~HomeRestorer() { qputenv("HOME", value); }
-        } restoreHome{originalHome};
+            QByteArray home = qgetenv("HOME");
+            QByteArray userProfile = qgetenv("USERPROFILE");
+            ~HomeRestorer() {
+                qputenv("HOME", home);
+                qputenv("USERPROFILE", userProfile);
+            }
+        } restoreHome;
         QVERIFY(qputenv("HOME", homeDirectory.path().toUtf8()));
+        QVERIFY(qputenv("USERPROFILE", homeDirectory.path().toUtf8()));
 
         const QString themeDirectory = homeDirectory.path()
             + QStringLiteral("/.local/state/omarchy/current/theme");
