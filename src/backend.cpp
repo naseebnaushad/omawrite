@@ -692,8 +692,16 @@ int Backend::countWords(const QString &text) {
 
 QString Backend::suggestedFileName(const QString &text) {
     QString name = text.section(QLatin1Char('\n'), 0, 0).trimmed();
+#ifdef Q_OS_WIN
+    // Windows additionally rejects these in file names and strips trailing dots.
+    name.replace(QRegularExpression(QStringLiteral("[<>:\"/\\\\|?*\\x00-\\x1f\\x7f]")),
+                 QStringLiteral("-"));
+    while (name.endsWith(QLatin1Char('.')))
+        name.chop(1);
+#else
     name.replace(QRegularExpression(QStringLiteral("[/\\x00-\\x1f\\x7f]")),
                  QStringLiteral("-"));
+#endif
     name = name.left(120).trimmed();
     if (name.isEmpty() || name == QStringLiteral(".") || name == QStringLiteral(".."))
         name = QStringLiteral("Untitled");

@@ -25,3 +25,10 @@ macos {
     QMAKE_BUNDLE_DISPLAY_NAME = Omawrite
     QMAKE_APPLICATION_BUNDLE_NAME = Omawrite
 }
+
+win32 {
+    RC_ICONS = windows/omawrite.ico
+    QMAKE_TARGET_COMPANY = Omacom
+    QMAKE_TARGET_PRODUCT = Omawrite
+    QMAKE_TARGET_DESCRIPTION = Omawrite Markdown writing app
+}

@@ -1,0 +1,6 @@
+bin/build text eol=lf
+bin/dmg text eol=lf
+bin/install text eol=lf
+bin/test text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=crlf
